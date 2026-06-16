@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Ollama Chat</title>
+    <style>
+        :root {
+            --bg: #1e1f22;
+            --panel: #2b2d31;
+            --text: #e3e3e3;
+            --muted: #9a9a9a;
+            --accent: #5865f2;
+            --bubble-user: #5865f2;
+            --bubble-bot: #383a40;
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            font-family: -apple-system, Segoe UI, Roboto, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        header {
+            padding: 14px 20px;
+            background: var(--panel);
+            border-bottom: 1px solid #444;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        header h1 {
+            font-size: 16px;
+            margin: 0;
+        }
+
+        #status {
+            font-size: 12px;
+            color: var(--muted);
+        }
+
+        #status.ok {
+            color: #3ba55d;
+        }
+
+        #status.bad {
+            color: #ed4245;
+        }
+
+        #chat-window {
+            flex: 1;
+            overflow-y: auto;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .msg {
+            max-width: 70%;
+            padding: 10px 14px;
+            border-radius: 12px;
+            line-height: 1.4;
+            white-space: pre-wrap;
+        }
+
+        .msg.user {
+            align-self: flex-end;
+            background: var(--bubble-user);
+            color: white;
+        }
+
+        .msg.bot {
+            align-self: flex-start;
+            background: var(--bubble-bot);
+        }
+
+        .msg.system {
+            align-self: center;
+            background: transparent;
+            color: var(--muted);
+            font-size: 12px;
+        }
+
+        #input-bar {
+            display: flex;
+            gap: 8px;
+            padding: 16px;
+            background: var(--panel);
+            border-top: 1px solid #444;
+        }
+
+        #message-input {
+            flex: 1;
+            padding: 10px 14px;
+            border-radius: 8px;
+            border: 1px solid #555;
+            background: #1e1f22;
+            color: var(--text);
+            font-size: 14px;
+        }
+
+        button {
+            padding: 10px 16px;
+            border-radius: 8px;
+            border: none;
+            background: var(--accent);
+            color: white;
+            cursor: pointer;
+            font-size: 14px;
+        }
+
+        button:hover {
+            opacity: 0.9;
+        }
+
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        #file-label {
+            padding: 10px 14px;
+            border-radius: 8px;
+            background: #444;
+            cursor: pointer;
+            font-size: 14px;
+        }
+
+        #file-input {
+            display: none;
+        }
+    </style>
+</head>
+
+<body>
+
+    <header>
+        <h1>Ollama Chat - local prototype</h1>
+        <span id="status">checking backend...</span>
+    </header>
+
+    <div id="chat-window"></div>
+
+    <div id="input-bar">
+        <label id="file-label" for="file-input">Upload file</label>
+        <input id="file-input" type="file" accept=".txt,.md,.csv">
+        <input id="message-input" type="text" placeholder="Type a message... (try: calculate 12*7)">
+        <button id="send-btn">Send</button>
+    </div>
+
+    <script>
+        const BACKEND_URL = "http://localhost:8000";
+        const sessionId = "session-" + Math.random().toString(36).slice(2);
+
+        const chatWindow = document.getElementById("chat-window");
+        const input = document.getElementById("message-input");
+        const sendBtn = document.getElementById("send-btn");
+        const fileInput = document.getElementById("file-input");
+        const statusEl = document.getElementById("status");
+
+        function addMessage(text, role) {
+            const div = document.createElement("div");
+            div.className = "msg " + role;
+            div.textContent = text;
+            chatWindow.appendChild(div);
+            chatWindow.scrollTop = chatWindow.scrollHeight;
+            return div;
+        }
+
+        async function checkHealth() {
+            try {
+                const res = await fetch(BACKEND_URL + "/api/health");
+                const data = await res.json();
+                if (data.ollama_reachable) {
+                    statusEl.textContent = "connected to Ollama";
+                    statusEl.className = "ok";
+                } else {
+                    statusEl.textContent = "backend up, but Ollama not reachable";
+                    statusEl.className = "bad";
+                }
+            } catch (e) {
+                statusEl.textContent = "backend not reachable";
+                statusEl.className = "bad";
+            }
+        }
+
+        async function sendMessage() {
+            const text = input.value.trim();
+            if (!text) return;
+
+            addMessage(text, "user");
+            input.value = "";
+            sendBtn.disabled = true;
+
+            const botBubble = addMessage("", "bot");
+
+            try {
+                const res = await fetch(BACKEND_URL + "/api/chat", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ message: text, session_id: sessionId }),
+                });
+
+                if (!res.ok) {
+                    botBubble.textContent = "Error: " + res.status;
+                    return;
+                }
+
+                const reader = res.body.getReader();
+                const decoder = new TextDecoder();
+                let fullText = "";
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    fullText += decoder.decode(value, { stream: true });
+                    botBubble.textContent = fullText;
+                    chatWindow.scrollTop = chatWindow.scrollHeight;
+                }
+            } catch (e) {
+                botBubble.textContent = "Error: " + e.message;
+            } finally {
+                sendBtn.disabled = false;
+            }
+        }
+
+        fileInput.addEventListener("change", async () => {
+            const file = fileInput.files[0];
+            if (!file) return;
+
+            const formData = new FormData();
+            formData.append("file", file);
+            formData.append("session_id", sessionId);
+
+            addMessage("Uploading " + file.name + " ...", "system");
+
+            try {
+                const res = await fetch(BACKEND_URL + "/api/upload", {
+                    method: "POST",
+                    body: formData,
+                });
+                const data = await res.json();
+                addMessage(data.message || data.error, "system");
+            } catch (e) {
+                addMessage("Upload failed: " + e.message, "system");
+            }
+        });
+
+        sendBtn.addEventListener("click", sendMessage);
+        input.addEventListener("keydown", (e) => {
+            if (e.key === "Enter") sendMessage();
+        });
+
+        checkHealth();
+    </script>
+
+</body>
+
+</html>
