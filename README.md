@@ -127,4 +127,5 @@ persistent storage, minimal error handling.
 
 ## License
 
-MIT - see [LICENSE](LICENSE).
+MIT - see [LICENSE](LICENSE).git add README.md
+git commit -m "Merge: keep local README"
