@@ -3,7 +3,7 @@
 
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Ollama Chat</title>
     <style>
         :root {
@@ -37,11 +37,18 @@
             display: flex;
             justify-content: space-between;
             align-items: center;
+            gap: 12px;
         }
 
         header h1 {
             font-size: 16px;
             margin: 0;
+        }
+
+        .header-right {
+            display: flex;
+            align-items: center;
+            gap: 12px;
         }
 
         #status {
@@ -55,6 +62,29 @@
 
         #status.bad {
             color: #ed4245;
+        }
+
+        #model-select {
+            background: #1e1f22;
+            color: var(--text);
+            border: 1px solid #555;
+            border-radius: 6px;
+            padding: 6px 10px;
+            font-size: 13px;
+        }
+
+        #reset-btn {
+            background: #444;
+            color: var(--text);
+            border: none;
+            border-radius: 6px;
+            padding: 6px 12px;
+            font-size: 13px;
+            cursor: pointer;
+        }
+
+        #reset-btn:hover {
+            background: #555;
         }
 
         #chat-window {
@@ -147,7 +177,13 @@
 
     <header>
         <h1>Ollama Chat - local prototype</h1>
-        <span id="status">checking backend...</span>
+        <div class="header-right">
+            <select id="model-select" aria-label="Model select" title="Model select">
+                <option value="">Loading models...</option>
+            </select>
+            <button id="reset-btn">Reset chat</button>
+            <span id="status">checking backend...</span>
+        </div>
     </header>
 
     <div id="chat-window"></div>
@@ -168,6 +204,8 @@
         const sendBtn = document.getElementById("send-btn");
         const fileInput = document.getElementById("file-input");
         const statusEl = document.getElementById("status");
+        const modelSelect = document.getElementById("model-select");
+        const resetBtn = document.getElementById("reset-btn");
 
         function addMessage(text, role) {
             const div = document.createElement("div");
@@ -194,6 +232,57 @@
                 statusEl.className = "bad";
             }
         }
+
+        async function loadModels() {
+            try {
+                const res = await fetch(BACKEND_URL + "/api/models");
+                const data = await res.json();
+                if (data.error || !data.models || data.models.length === 0) {
+                    modelSelect.innerHTML = '<option value="">No models found</option>';
+                    return;
+                }
+                modelSelect.innerHTML = "";
+                for (const name of data.models) {
+                    const opt = document.createElement("option");
+                    opt.value = name;
+                    opt.textContent = name;
+                    modelSelect.appendChild(opt);
+                }
+                await selectModel(modelSelect.value);
+            } catch (e) {
+                modelSelect.innerHTML = '<option value="">Could not load models</option>';
+            }
+        }
+
+        async function selectModel(modelName) {
+            if (!modelName) return;
+            try {
+                await fetch(BACKEND_URL + "/api/select_model", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ session_id: sessionId, model: modelName }),
+                });
+            } catch (e) {
+                addMessage("Could not set model: " + e.message, "system");
+            }
+        }
+
+        modelSelect.addEventListener("change", () => selectModel(modelSelect.value));
+
+        resetBtn.addEventListener("click", async () => {
+            try {
+                const res = await fetch(BACKEND_URL + "/api/reset", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ session_id: sessionId }),
+                });
+                const data = await res.json();
+                chatWindow.innerHTML = "";
+                addMessage(data.message || "Conversation reset.", "system");
+            } catch (e) {
+                addMessage("Reset failed: " + e.message, "system");
+            }
+        });
 
         async function sendMessage() {
             const text = input.value.trim();
@@ -263,6 +352,7 @@
         });
 
         checkHealth();
+        loadModels();
     </script>
 
 </body>
