@@ -1,5 +1,6 @@
 import json
 import re
+import datetime
 
 import requests
 from flask import Flask, request, jsonify, Response
@@ -9,10 +10,12 @@ app = Flask(__name__)
 CORS(app)
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
-MODEL_NAME = "llama3.2"
+OLLAMA_TAGS_URL = "http://localhost:11434/api/tags"
+DEFAULT_MODEL = "llama3.2"
 
 uploaded_files = {}
 conversations = {}
+session_models = {}
 
 TOOL_SYSTEM_PROMPT = """You have access to these tools:
 
@@ -25,6 +28,10 @@ TOOL_CALL: tool_name(argument)
 If you don't need a tool, just answer normally.
 """
 
+MATH_FALLBACK_PATTERN = re.compile(
+    r"(?:what'?s|calculate|compute)\s+([0-9+\-*/().\s]+)", re.IGNORECASE
+)
+
 
 def run_calculator(expression: str) -> str:
     if not re.fullmatch(r"[0-9+\-*/().\s]+", expression):
@@ -36,7 +43,6 @@ def run_calculator(expression: str) -> str:
 
 
 def run_current_time(_unused: str = "") -> str:
-    import datetime
     return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
@@ -46,21 +52,26 @@ TOOL_FUNCTIONS = {
 }
 
 
-def call_ollama(prompt: str) -> str:
+def call_ollama(prompt: str, model: str) -> str:
     response = requests.post(
         OLLAMA_URL,
-        json={"model": MODEL_NAME, "prompt": prompt, "stream": False},
+        json={"model": model, "prompt": prompt, "stream": False},
         timeout=120,
     )
+    response.raise_for_status()
     return response.json().get("response", "")
 
 
 def try_parse_tool_call(text: str):
     match = re.search(r"TOOL_CALL:\s*(\w+)\((.*?)\)", text)
-    if not match:
-        return None
-    tool_name, argument = match.group(1), match.group(2)
-    return tool_name, argument
+    if match:
+        return match.group(1), match.group(2)
+
+    fallback = MATH_FALLBACK_PATTERN.search(text)
+    if fallback:
+        return "calculator", fallback.group(1).strip()
+
+    return None
 
 
 def build_history_text(session_id: str) -> str:
@@ -70,6 +81,41 @@ def build_history_text(session_id: str) -> str:
         lines.append(f"User: {turn['user']}")
         lines.append(f"Assistant: {turn['assistant']}")
     return "\n".join(lines)
+
+
+def get_model_for_session(session_id: str) -> str:
+    return session_models.get(session_id, DEFAULT_MODEL)
+
+
+@app.route("/api/models", methods=["GET"])
+def list_models():
+    try:
+        r = requests.get(OLLAMA_TAGS_URL, timeout=5)
+        r.raise_for_status()
+        models = [m["name"] for m in r.json().get("models", [])]
+        return jsonify({"models": models})
+    except requests.exceptions.RequestException as exc:
+        return jsonify({"error": f"Could not reach Ollama: {exc}"}), 503
+
+
+@app.route("/api/select_model", methods=["POST"])
+def select_model():
+    data = request.get_json()
+    session_id = data.get("session_id", "default")
+    model = data.get("model")
+    if not model:
+        return jsonify({"error": "No model specified"}), 400
+    session_models[session_id] = model
+    return jsonify({"message": f"Using model '{model}' for this session"})
+
+
+@app.route("/api/reset", methods=["POST"])
+def reset_session():
+    data = request.get_json()
+    session_id = data.get("session_id", "default")
+    conversations.pop(session_id, None)
+    uploaded_files.pop(session_id, None)
+    return jsonify({"message": "Conversation and uploaded file cleared"})
 
 
 @app.route("/api/upload", methods=["POST"])
@@ -98,6 +144,7 @@ def chat():
     if not user_message.strip():
         return jsonify({"error": "Message cannot be empty"}), 400
 
+    model = get_model_for_session(session_id)
     file_text = uploaded_files.get(session_id)
     history_text = build_history_text(session_id)
 
@@ -109,7 +156,16 @@ def chat():
     prompt_parts.append(f"User: {user_message}\nAssistant:")
 
     first_prompt = "\n\n".join(prompt_parts)
-    first_response = call_ollama(first_prompt)
+
+    try:
+        first_response = call_ollama(first_prompt, model)
+    except requests.exceptions.Timeout:
+        return Response(
+            "The model is taking too long to respond. Try again, or try a smaller model.",
+            mimetype="text/plain",
+        )
+    except requests.exceptions.RequestException as exc:
+        return Response(f"Could not reach Ollama: {exc}", mimetype="text/plain")
 
     tool_call = try_parse_tool_call(first_response)
     final_response = first_response
@@ -125,7 +181,10 @@ def chat():
                 f"Tool result: {tool_result}\n\n"
                 f"Now give the user a final natural-language answer using this result."
             )
-            final_response = call_ollama(follow_up_prompt)
+            try:
+                final_response = call_ollama(follow_up_prompt, model)
+            except requests.exceptions.RequestException:
+                final_response = f"The answer is {tool_result}."
         else:
             final_response = f"(Requested unknown tool: {tool_name})"
 
@@ -142,7 +201,7 @@ def chat():
 @app.route("/api/health", methods=["GET"])
 def health():
     try:
-        r = requests.get("http://localhost:11434/api/tags", timeout=5)
+        r = requests.get(OLLAMA_TAGS_URL, timeout=5)
         ollama_ok = r.status_code == 200
     except requests.exceptions.RequestException:
         ollama_ok = False
